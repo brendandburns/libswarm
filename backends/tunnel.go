@@ -32,26 +32,20 @@ const (
 	dockerHost = "127.0.0.1:4243"
 )
 
-// newSSHKey Read parses a private SSH key.
-func newSSHKey(path string) (ssh.Signer, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("unable to load ssh key from %q: %v", path, err)
-	}
-	defer f.Close()
-
-	bs, err := ioutil.ReadAll(f)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read ssh key: %v", err)
-	}
-	return ssh.ParsePrivateKey(bs)
-}
-
 // sshDialer is a ssh tunnel connection dialer.
 type sshDialer func(string, string) (net.Conn, error)
 
-// newSSHTunnel creates a SSH tunnel to a given address.
-func newSSHTunnel(username, addr string, key ssh.Signer) (sshDialer, error) {
+// newSSHTunnel creates a SSH tunnel to a given address w/ the given identity.
+func newSSHTunnel(connStr, identityPath string) (sshDialer, error) {
+	username, addr, err := parseSSHConnectionString(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ssh connection string %q: %v", addr, err)
+	}
+	key, err := parseSSHKey(identityPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ssh key for identity %q: %v", identityPath, err)
+	}
+
 	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{
@@ -75,6 +69,22 @@ func newSSHTunnel(username, addr string, key ssh.Signer) (sshDialer, error) {
 	}, nil
 }
 
+// parseSSHKey parses a private SSH key from a given path.
+func parseSSHKey(path string) (ssh.Signer, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load ssh key from %q: %v", path, err)
+	}
+	defer f.Close()
+
+	bs, err := ioutil.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ssh key: %v", err)
+	}
+	return ssh.ParsePrivateKey(bs)
+}
+
+// parseSSHConnectionString parses `user@host:22` SSH connection string.
 func parseSSHConnectionString(conn string) (username, addr string, err error) {
 	parts := strings.Split(conn, "@")
 	if len(parts) == 1 {
@@ -94,6 +104,7 @@ func parseSSHConnectionString(conn string) (username, addr string, err error) {
 	return
 }
 
+// SSHTunnel provides a swarm backend for a tunneled dockerclient.
 func SSHTunnel() libswarm.Sender {
 	backend := libswarm.NewServer()
 	backend.OnSpawn(func(cmd ...string) (libswarm.Sender, error) {
@@ -101,22 +112,13 @@ func SSHTunnel() libswarm.Sender {
 			return nil, fmt.Errorf("tunnel: spawn takes exactly 2 arguments, got %d; usage: %s", len(cmd), usage)
 		}
 
-		connStr, identityPath := cmd[0], cmd[1]
-		username, addr, err := parseSSHConnectionString(connStr)
+		log.Printf("tunnel: connecting to %q", cmd[0])
+		dialer, err := newSSHTunnel(cmd[0], cmd[1])
 		if err != nil {
-			return nil, fmt.Errorf("tunnel: invalid ssh connection string %q: %v", addr, err)
+			return nil, fmt.Errorf("tunnel: failed to create ssh tunnel to %q: %v", cmd[0], err)
 		}
-		key, err := newSSHKey(identityPath)
-		if err != nil {
-			return nil, fmt.Errorf("tunnel: failed to get ssh key for identity %q: %v", identityPath, err)
-		}
-		log.Printf("tunnel: connecting to %q", addr)
-		dialer, err := newSSHTunnel(username, addr, key)
-		if err != nil {
-			return nil, fmt.Errorf("tunnel: failed to create ssh tunnel to %q: %v", addr, err)
-		}
+		log.Printf("tunnel: connected to %q", cmd[0])
 
-		log.Printf("tunnel: connected to %q", addr)
 		client := newClient()
 		client.urlHost = dockerHost
 		client.transport.Dial = dialer
