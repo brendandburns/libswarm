@@ -78,7 +78,7 @@ This service can be used to control a Docker Engine from libswarm services. It t
 
 ### SSH tunnel
 
-*Help wanted!*
+*Johan Euphrosine (proppy)*
 
 ### Etcd
 
