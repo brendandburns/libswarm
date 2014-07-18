@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"os/user"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 
 const (
 	testSSHListenAddr = "127.0.0.1:2022"
+	testSSHUser       = "test-ssh-user"
 	testSSHPrivateKey = `-----BEGIN RSA PRIVATE KEY-----
 MIIBOwIBAAJBALdGZxkXDAjsYk10ihwU6Id2KeILz1TAJuoq4tOgDWxEEGeTrcld
 r/ZwVaFzjWzxaf6zQIJbfaSEAhqD5yo72+sCAwEAAQJBAK8PEVU23Wj8mV0QjwcJ
@@ -26,12 +28,15 @@ rrxx26itVhJmcvoUhOjwuzSlP2bE5VHAvkGB352YBg==
 `
 )
 
-func TestSSHTunnelSpawn(t *testing.T) {
+func TestSSHTunnelClient(t *testing.T) {
+	// start a ssh server
+	conns := make(chan ssh.ConnMetadata)
 	chanchan := make(chan (<-chan ssh.NewChannel))
 	go func() {
 		config := &ssh.ServerConfig{
 			PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 				log.Println("discarding key based auth")
+				conns <- c
 				return nil, nil
 			},
 		}
@@ -59,6 +64,8 @@ func TestSSHTunnelSpawn(t *testing.T) {
 		go ssh.DiscardRequests(reqs)
 		chanchan <- chans
 	}()
+
+	// create the libswarm backend
 	tunnel := SSHTunnel()
 	tunnelClient := libswarm.AsClient(tunnel)
 	tmpKey, err := ioutil.TempFile("", "libswarm-tunnel-test-empty-key")
@@ -67,16 +74,28 @@ func TestSSHTunnelSpawn(t *testing.T) {
 	}
 	defer tmpKey.Close()
 	tmpKey.WriteString(testSSHPrivateKey)
-	dockerClient, err := tunnelClient.Spawn(testSSHListenAddr, tmpKey.Name())
-	if err != nil {
-		t.Fatalf("failed to spawn tunnel backend: %v", err)
+
+	// spawnn the docker client from the backend and call Ls verb.
+	go func() {
+		dockerClient, err := tunnelClient.Spawn("testuser@"+testSSHListenAddr, tmpKey.Name())
+		if err != nil {
+			t.Fatalf("failed to spawn tunnel backend: %v", err)
+		}
+		dockerClient.Ls()
+	}()
+
+	// validate username
+	conn := <-conns
+	if conn.User() != "testuser" {
+		t.Errorf("execpeted user: %q, got %q", "testuser", conn.User())
 	}
-	go dockerClient.Ls()
+
+	// validate tunnel conn
 	chans := <-chanchan
 	newChan := <-chans
 	log.Printf("tunnel: test: got newchan:%q", newChan.ChannelType())
 	if newChan.ChannelType() != "direct-tcpip" {
-		t.Fatalf("expected tunneling with newchan:direct-tcpip, got %q", newChan.ChannelType())
+		t.Fatalf("expected tunneled connection with newchan:direct-tcpip, got %q", newChan.ChannelType())
 	}
 }
 
@@ -89,5 +108,35 @@ func TestSSHTunnelSpawnBadArgs(t *testing.T) {
 	}
 	if _, err := libswarm.AsClient(SSHTunnel()).Spawn(testSSHListenAddr, "/unlikely-to-exists"); err == nil || !strings.Contains(err.Error(), "key") {
 		t.Fatalf("expected key error, got %q", err)
+	}
+}
+
+func TestParserSSHConnectionString(t *testing.T) {
+	usr, err := user.Current()
+	if err != nil {
+		t.Fatalf("failed to get current user: %v", err)
+	}
+	connTests := []struct {
+		conn string
+		user string
+		addr string
+		err  bool
+	}{
+		{"foo@bar:22", "foo", "bar:22", false},
+		{"bar:22", usr.Username, "bar:22", false},
+		{"bar", "", "", true},
+	}
+	for _, ct := range connTests {
+		u, a, err := parseSSHConnectionString(ct.conn)
+		if ct.err != (err != nil) {
+			t.Errorf("expectxed err: %q, got %q", ct.err, err)
+			continue
+		}
+		if ct.user != u {
+			t.Errorf("expected user: %q, got %q", ct.user, u)
+		}
+		if ct.addr != a {
+			t.Errorf("expected addr: %q, got %q", ct.addr, u)
+		}
 	}
 }

@@ -50,14 +50,10 @@ func newSSHKey(path string) (ssh.Signer, error) {
 // sshDialer is a ssh tunnel connection dialer.
 type sshDialer func(string, string) (net.Conn, error)
 
-// newSSHTunnel creates a SSH tunnel to a given IP and port.
-func newSSHTunnel(addr string, key ssh.Signer) (sshDialer, error) {
-	usr, err := user.Current()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current user: %v", err)
-	}
+// newSSHTunnel creates a SSH tunnel to a given address.
+func newSSHTunnel(username, addr string, key ssh.Signer) (sshDialer, error) {
 	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User: usr.Username,
+		User: username,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(key),
 		},
@@ -79,6 +75,25 @@ func newSSHTunnel(addr string, key ssh.Signer) (sshDialer, error) {
 	}, nil
 }
 
+func parseSSHConnectionString(conn string) (username, addr string, err error) {
+	parts := strings.Split(conn, "@")
+	if len(parts) == 1 {
+		usr, err := user.Current()
+		if err != nil {
+			return "", "", fmt.Errorf("failed to get current user: %v", err)
+		}
+		username = usr.Username
+		addr = parts[0]
+	} else {
+		username = parts[0]
+		addr = parts[1]
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return "", "", err
+	}
+	return
+}
+
 func SSHTunnel() libswarm.Sender {
 	backend := libswarm.NewServer()
 	backend.OnSpawn(func(cmd ...string) (libswarm.Sender, error) {
@@ -86,8 +101,8 @@ func SSHTunnel() libswarm.Sender {
 			return nil, fmt.Errorf("tunnel: spawn takes exactly 2 arguments, got %d; usage: %s", len(cmd), usage)
 		}
 
-		addr, identityPath := cmd[0], cmd[1]
-		_, _, err := net.SplitHostPort(addr)
+		connStr, identityPath := cmd[0], cmd[1]
+		username, addr, err := parseSSHConnectionString(connStr)
 		if err != nil {
 			return nil, fmt.Errorf("tunnel: invalid ssh connection string %q: %v", addr, err)
 		}
@@ -96,7 +111,7 @@ func SSHTunnel() libswarm.Sender {
 			return nil, fmt.Errorf("tunnel: failed to get ssh key for identity %q: %v", identityPath, err)
 		}
 		log.Printf("tunnel: connecting to %q", addr)
-		dialer, err := newSSHTunnel(addr, key)
+		dialer, err := newSSHTunnel(username, addr, key)
 		if err != nil {
 			return nil, fmt.Errorf("tunnel: failed to create ssh tunnel to %q: %v", addr, err)
 		}
